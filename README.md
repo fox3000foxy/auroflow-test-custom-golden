@@ -19,13 +19,15 @@ No Windows reinstallation. No full disk upload after each session. Only incremen
 - Automatic CPU and RAM allocation.
 - Preinstalled VirtIO drivers.
 - RDP optimized for up to 60 FPS.
-- Automated ngrok TCP integration.
+- Automated ngrok TCP integration with encrypted session endpoint metadata.
 - Optional Hugging Face persistence.
-- Incremental Zstandard-compressed QCOW2 layers.
+- Incremental Zstandard-compressed QCOW2 layers and compatible custom Golden Images.
 - Preserved UEFI and TPM state.
 - Parallel release asset downloads.
 - APT, pip, ngrok and Golden Image caching.
 - Automatic shutdown and integrity-checked backups.
+- Offline compaction of accumulated layers with remote restore verification.
+- Hugging Face history squash and orphan LFS cleanup, with destructive-operation safeguards.
 - Standalone deployment with no external orchestration repository required.
 
 ## Quick start
@@ -41,12 +43,16 @@ Navigate to **Settings → Secrets and variables → Actions**.
 | Secret | Required | Description |
 |---|---|---|
 | `NGROK_AUTHTOKEN` | Yes | ngrok authentication token |
-| `HF_TOKEN` | No | Hugging Face token with dataset creation and write permissions |
+| `HF_TOKEN` | For persistence | Hugging Face token with dataset creation and write permissions |
 
 Tokens can be obtained from:
 
 - [ngrok Dashboard](https://dashboard.ngrok.com/get-started/your-authtoken)
 - [Hugging Face Settings](https://huggingface.co/settings/tokens)
+
+The current encrypted-session workflow also requires the Actions variable `AUROFLOW_PUBLIC_KEY`, populated automatically when starting an instance from the [AuroFlow Dashboard](https://fox3000foxy.com/auroflow/dashboard/). It must contain a base64-encoded 32-byte Curve25519 public key. Direct workflow dispatch without this variable fails at tunnel publication rather than exposing a plaintext RDP endpoint.
+
+Use `GOLDEN_URL` and `GOLDEN_SHA256` to select a compatible custom QCOW2 Golden Image, or leave `GOLDEN_URL` empty to use the reference image. A custom image must meet the VM's x86-64, UEFI, VirtIO and RDP requirements. The base image is immutable; accumulated layers are tied to its checksum.
 
 An optional repository variable, `HF_REPO`, allows you to specify a custom Hugging Face dataset.
 
@@ -58,7 +64,9 @@ Otherwise, the dataset is automatically created using the following naming conve
 
 Before exposing the VM, configure a strong Windows password through a trusted connection and restrict network access to the ngrok endpoint. The reference image contains a passwordless account, and the ngrok agent token does not authenticate RDP clients.
 
-Navigate to **Actions → Windows Golden VM → Run workflow**.
+For normal use, configure your workspace and launch the VM from the [AuroFlow Dashboard](https://fox3000foxy.com/auroflow/dashboard/). It registers the per-workspace encryption public key before triggering the GitHub Actions workflow.
+
+For manual workflows, first configure `AUROFLOW_PUBLIC_KEY` and the required secrets in the repository. The GitHub Actions workflow is named **AuroFlow VM**.
 
 Alternatively, use GitHub CLI:
 
@@ -68,15 +76,9 @@ gh workflow run windows-persistent.yml --ref main
 
 ### 4. Connect to Windows
 
-Once the **Start ngrok RDP tunnel** step completes, an RDP address is displayed in the workflow logs and annotations.
+After the **Start ngrok RDP tunnel** step completes, the Engine encrypts the ngrok TCP address with the workspace public key and publishes `encrypted_endpoint` in schema-v3 `session.json` on `golden-control`. It does not write the plaintext address to that session file or print it for the user.
 
-Example:
-
-```text
-tcp://0.tcp.ngrok.io:12345
-```
-
-Connect using your preferred RDP client, without the `tcp://` prefix.
+Open the Dashboard in the browser that started the session to decrypt and copy the RDP `host:port` address or download a `.rdp` connection file. The reference Windows username is `Cloud` and its password is empty by default. Configure a strong password before remote use.
 
 ### 5. Save your session
 
@@ -102,7 +104,7 @@ Wait for the workflow to complete.
 | Session restoration | No | Yes |
 | Persistent files and applications | No | Yes |
 
-Persistent mode is automatically enabled when `HF_TOKEN` is configured.
+Persistent mode is enabled when `HF_TOKEN` is configured. If the token is omitted, changes cannot be persisted across runs. RDP tunnel publication still requires `AUROFLOW_PUBLIC_KEY` in either mode.
 
 ## Architecture
 
@@ -215,6 +217,12 @@ Resources can also be overridden using environment variables.
 
 The reference GitHub Actions test successfully allocated 4 vCPUs and 13 GiB of RAM.
 
+## Encrypted session publishing
+
+The Dashboard creates a workspace-specific Curve25519 key pair locally and writes only the public key to the `AUROFLOW_PUBLIC_KEY` Actions variable. The Engine uses PyNaCl SealedBox to encrypt a payload containing the repository, workflow run ID and RDP endpoint. The session control branch stores `schema_version: 3` and `encrypted_endpoint`; plaintext fallback is rejected. The browser retains the private key, and losing it prevents decrypting an active session.
+
+The encryption protects the endpoint in published session metadata, not the RDP protocol or Windows account. A discovered tunnel can still be accessed; set strong Windows credentials and secure the workspace.
+
 ## Disk optimization
 
 | Stage | Allocated size |
@@ -226,6 +234,23 @@ The reference GitHub Actions test successfully allocated 4 vCPUs and 13 GiB of R
 **Approximately 47% storage reduction**, while retaining the full 64 GiB virtual disk capacity.
 
 A newly created writable overlay initially occupies approximately 196 KiB.
+
+## Automatic layer compaction and LFS cleanup
+
+The `compact-layers.yml` workflow runs daily at `0 4 * * *` (04:00 UTC) and can be dispatched manually. Manual `dry_run` defaults to `true`. The VM workflow and the compact workflow share the `windows-golden` GitHub Actions concurrency group, so they cannot operate on persistence layers concurrently.
+
+When there are at least two saved layers, the compactor downloads and verifies the Golden Image and the entire layer chain, copies the overlays into temporary storage and commits them into a single differential QCOW2 layer without modifying the immutable base. It compares the consolidated disk with the original guest-visible disk and skips publication if the new layer is larger. A successful commit replaces the chain in `latest.json` and deletes the obsolete layer paths at the dataset HEAD. A fresh remote restore verifies disk, UEFI, TPM and content equivalence.
+
+With history cleanup enabled, the workflow runs `super_squash_history` only after successful remote verification. It then audits live LFS object hashes and references before permanently deleting unreferenced objects. This destruction is irreversible. Retain an independent backup of important data; history rewriting removes old recovery points.
+
+| Variable | Purpose | Instance default |
+|---|---|---|
+| `AUROFLOW_COMPACTION_ENABLED` | Run the scheduled compact workflow | Off unless set to `true` |
+| `AUROFLOW_SQUASH_HISTORY` | Squash Git history and clean orphan LFS after a verified compaction | Off unless set to `true` |
+
+The template and the existing test instance do not currently share the same defaults. A scheduled workflow is not a guarantee of runtime success; inspect its logs, especially after enabling destructive cleanup.
+
+In a verified test, three layers totalling 1090.3 MiB were consolidated to 998.1 MiB (8.5% reduction); a remote restore and Windows boot succeeded. Orphan LFS cleanup was also verified manually on the test dataset (approximately 1.144 GB recovered). The full scheduled cleanup path still requires observation in operation.
 
 ## Caching and performance
 
@@ -336,7 +361,7 @@ Cross-runner persistence was successfully demonstrated by creating a desktop fol
 
 ## Roadmap
 
-- Automatic layer compaction.
+- Monitoring of scheduled compaction and history/LFS cleanup under real workloads.
 - Parallel Hugging Face layer downloads.
 - Session snapshots.
 - Rollback to previous sessions.
@@ -345,9 +370,9 @@ Cross-runner persistence was successfully demonstrated by creating a desktop fol
 
 ## Security and licensing
 
-The reference Windows installation contains a passwordless local account. Configure strong credentials and restrict network access before exposing RDP.
+The reference Windows installation uses the `Cloud` account with no default password. Configure strong credentials and restrict network access before exposing RDP.
 
-Persistence datasets are private by design. Never commit authentication tokens or store private session layers in public caches.
+Persistence datasets are private by design. Never commit authentication tokens or store private session layers in public caches. Dataset history squash and LFS deletion are permanent and can make historical rollbacks impossible.
 
 The reference UEFI and TPM state is shared and should not be treated as a unique private device identity.
 
