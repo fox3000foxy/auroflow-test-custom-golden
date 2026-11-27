@@ -67,9 +67,13 @@ def main():
     backing = os.path.relpath(p.base, output)
 
     print(f'[COMPACT] Consolidating {len(chain)} layers', flush=True)
+    # Flatten the complete chain before attaching the Golden Image.
+    # Safe rebase preserves guest-visible content.
     p.run('qemu-img', 'convert', '-f', 'qcow2', '-O', 'qcow2',
           '-c', '-o', 'compression_type=zstd',
-          '-B', backing, '-F', 'qcow2', str(source), str(target))
+          str(source), str(target))
+    p.run('qemu-img', 'rebase', '-f', 'qcow2',
+          '-F', 'qcow2', '-b', backing, str(target))
     p.run('qemu-img', 'check', '-f', 'qcow2', str(target))
     p.run('qemu-img', 'compare', '-f', 'qcow2', '-F', 'qcow2',
           str(source), str(target))
