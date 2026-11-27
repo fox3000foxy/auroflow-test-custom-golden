@@ -72,7 +72,7 @@ def publish(endpoint):
             session["endpoint"] = endpoint
 
         Path(tmp, "session.json").write_text(
-            json.dumps(session, indent=2) + "\\n"
+            json.dumps(session, indent=2) + "\n"
         )
 
         git("add", "session.json")
