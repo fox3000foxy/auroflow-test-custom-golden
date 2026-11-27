@@ -20,6 +20,74 @@ MIN_LAYERS = 2
 MIN_GAIN = 0.0
 
 
+def verify_published_restore(expected_revision, original_source, expected_state, hashes, new_id):
+    """Independently re-download and restore the committed HF state."""
+    import subprocess
+
+    verify_root = p.root / 'verify-remote-restore'
+    verify_root.mkdir(parents=True, exist_ok=False)
+    (verify_root / 'tpm').mkdir()
+    # The base must have the same name relative to the freshly restored layer.
+    os.link(p.base, verify_root / p.base.name)
+
+    current = p.api.repo_info(p.repo, **p.opts)
+    if current.sha != expected_revision or not current.private:
+        raise RuntimeError('Remote revision or dataset privacy changed before restore')
+
+    restore_env = os.environ.copy()
+    restore_env['VM_ROOT'] = str(verify_root)
+    subprocess.run(
+        [sys.executable, str(Path(__file__).with_name('persistence.py')), 'restore'],
+        check=True, env=restore_env,
+    )
+
+    restored = json.loads((verify_root / 'session.json').read_text())
+    if restored['revision'] != expected_revision or restored['state'] != expected_state:
+        raise RuntimeError('Restored state does not match committed state')
+
+    disk = verify_root / 'layers' / new_id / 'disk.qcow2'
+    if p.sha(disk) != hashes['disk.qcow2']:
+        raise RuntimeError('Restored compact disk checksum mismatch')
+    if p.sha(verify_root / 'OVMF_VARS.fd') != hashes['OVMF_VARS.fd']:
+        raise RuntimeError('Restored UEFI state checksum mismatch')
+    if p.sha(verify_root / 'tpm' / 'tpm2-00.permall') != hashes['tpm2-00.permall']:
+        raise RuntimeError('Restored TPM state checksum mismatch')
+
+    p.run('qemu-img', 'check', '-f', 'qcow2', str(disk))
+    p.run('qemu-img', 'compare', '-f', 'qcow2', '-F', 'qcow2',
+          str(original_source), str(disk))
+    print('[COMPACT] Published state restored and compared successfully', flush=True)
+
+
+def squash_history(expected_revision, expected_state, expected_paths, hashes, new_id):
+    """Destructive history cleanup only after verified remote restoration."""
+    before = p.api.repo_info(p.repo, **p.opts)
+    if not before.private or before.sha != expected_revision:
+        raise RuntimeError('HF dataset changed before history squash')
+
+    print('[COMPACT] Squashing HF history (irreversible)...', flush=True)
+    p.api.super_squash_history(
+        repo_id=p.repo, branch='main',
+        commit_message=f'Compacted AuroFlow state {new_id}',
+        **p.opts,
+    )
+
+    after = p.api.repo_info(p.repo, **p.opts)
+    if not after.private:
+        raise RuntimeError('Dataset is no longer private after squash')
+    after_paths = set(p.api.list_repo_files(p.repo, revision=after.sha, **p.opts))
+    if after_paths != expected_paths:
+        raise RuntimeError('HF file list changed after squash')
+    remote_state = json.loads(p.download('latest.json', after.sha).read_text())
+    if remote_state != expected_state:
+        raise RuntimeError('State changed after squash')
+    prefix = f'layers/{new_id}/'
+    for name, expected_hash in hashes.items():
+        if p.sha(p.download(prefix + name, after.sha)) != expected_hash:
+            raise RuntimeError(f'File checksum changed after squash: {name}')
+    print('[COMPACT] History squashed and verified', flush=True)
+
+
 def main():
     if not os.environ.get('HF_TOKEN'):
         print('[COMPACT] No Hugging Face token, skipping')
@@ -119,7 +187,7 @@ def main():
     print(f'[COMPACT] Consolidated:    {new_size / 2**20:.1f} MiB')
     print(f'[COMPACT] Gain: {gain:.1%}')
     if gain < MIN_GAIN:
-        print('[COMPACT] Below 10% threshold; keeping original chain')
+        print('[COMPACT] Consolidated result is larger than the source; preserving existing layers')
         return
 
     # restore() has copied the latest layer's UEFI/TPM state into root.
@@ -181,8 +249,14 @@ def main():
             raise RuntimeError(f'Missing remote compacted file: {name}')
     if any(path in final_paths for path in old_files):
         raise RuntimeError('Obsolete layer files still present at HEAD')
+    print('[COMPACT] Verifying clean restoration from published dataset...', flush=True)
+    verify_published_restore(final_revision, source, new_state, hashes, new_id)
     print('[COMPACT] Success: active layer chain consolidated', flush=True)
-    print('[COMPACT] Historical HF revisions are retained; this is not history squashing')
+
+    if os.environ.get('COMPACT_SQUASH_HISTORY') == '1':
+        squash_history(final_revision, new_state, final_paths, hashes, new_id)
+    else:
+        print('[COMPACT] HF history retained; AUROFLOW_SQUASH_HISTORY is disabled')
 
 
 if __name__ == '__main__':

@@ -33,6 +33,7 @@ jobs:
       HF_REPO: ${{ vars.HF_REPO }}
       HF_TOKEN: ${{ secrets.HF_TOKEN }}
       COMPACT_DRY_RUN: ${{ github.event_name == 'workflow_dispatch' && inputs.dry_run && '1' || '0' }}
+      COMPACT_SQUASH_HISTORY: ${{ vars.AUROFLOW_SQUASH_HISTORY == 'true' && '1' || '0' }}
 
     steps:
       - uses: actions/checkout@v5
