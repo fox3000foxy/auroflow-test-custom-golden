@@ -1,0 +1,100 @@
+name: Compact AuroFlow Layers
+
+on:
+  schedule:
+    - cron: '0 4 * * *'
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: 'Verify only; do not update the dataset'
+        type: boolean
+        default: true
+
+permissions:
+  contents: read
+
+# MUST match windows-persistent.yml's concurrency group. A compact job cannot
+# overlap an active VM session or the upload of its persisted layers.
+concurrency:
+  group: windows-golden
+  cancel-in-progress: false
+
+jobs:
+  compact:
+    # Scheduled execution is opt-in; manual dry-run is available immediately.
+    if: github.event_name == 'workflow_dispatch' || vars.AUROFLOW_COMPACTION_ENABLED == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    env:
+      VM_MODE: persistent
+      GOLDEN_REPO: fox3000foxy/auroflow-engine
+      GOLDEN_URL: ${{ vars.GOLDEN_URL }}
+      GOLDEN_SHA256: ${{ vars.GOLDEN_SHA256 }}
+      HF_REPO: ${{ vars.HF_REPO }}
+      HF_TOKEN: ${{ secrets.HF_TOKEN }}
+      COMPACT_DRY_RUN: ${{ github.event_name == 'workflow_dispatch' && inputs.dry_run && '1' || '0' }}
+
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Initialize
+        run: echo "VM_ROOT=$(mktemp -d "$RUNNER_TEMP/compact.XXXXXXXX")" >> "$GITHUB_ENV"
+
+      - name: Prepare dependencies
+        if: env.HF_TOKEN != ''
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends qemu-utils qemu-block-extra
+          python3 -m venv "$VM_ROOT/venv"
+          "$VM_ROOT/venv/bin/pip" -q install huggingface_hub
+
+      - name: Resolve private dataset and eligibility
+        id: check
+        if: env.HF_TOKEN != ''
+        run: |
+          "$VM_ROOT/venv/bin/python" <<'PY'
+          import json, os
+          from huggingface_hub import HfApi, hf_hub_download
+          api = HfApi(token=os.environ['HF_TOKEN'])
+          name = os.environ.get('HF_REPO', '').strip()
+          if not name:
+              name = api.whoami()['name'] + '/' + os.environ['GITHUB_REPOSITORY'].split('/')[-1] + '-layers'
+          try:
+              meta = api.repo_info(name, repo_type='dataset')
+          except Exception as error:
+              print('[COMPACT] Dataset not yet accessible:', type(error).__name__)
+              with open(os.environ['GITHUB_OUTPUT'], 'a') as f: f.write('eligible=false\n')
+              raise SystemExit(0)
+          if not meta.private:
+              raise RuntimeError('Persistence dataset must be private')
+          files = api.list_repo_files(name, repo_type='dataset', revision=meta.sha)
+          count = 0
+          if 'latest.json' in files:
+              file = hf_hub_download(repo_id=name, filename='latest.json',
+                                     repo_type='dataset', revision=meta.sha,
+                                     token=os.environ['HF_TOKEN'])
+              with open(file) as f: count = len(json.load(f)['chain'])
+          print('[COMPACT] Active layers:', count)
+          with open(os.environ['GITHUB_ENV'], 'a') as f: f.write('HF_REPO=' + name + '\n')
+          with open(os.environ['GITHUB_OUTPUT'], 'a') as f:
+              f.write('eligible=' + str(count >= 2).lower() + '\n')
+          PY
+
+      - name: Restore Golden Image
+        if: steps.check.outputs.eligible == 'true'
+        run: |
+          if [ -n "$GOLDEN_URL" ]; then
+            "$VM_ROOT/venv/bin/python" scripts/download-custom-golden.py
+          else
+            bash scripts/download-golden.sh
+          fi
+
+      - name: Consolidate and verify layers
+        if: steps.check.outputs.eligible == 'true'
+        run: |
+          "$VM_ROOT/venv/bin/python" scripts/compact-layers.py
+
+      - name: Cleanup
+        if: always()
+        run: |
+          if [ -n "${VM_ROOT:-}" ]; then rm -rf -- "$VM_ROOT"; fi
