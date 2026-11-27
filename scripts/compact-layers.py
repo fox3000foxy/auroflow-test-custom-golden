@@ -86,6 +86,13 @@ def squash_history(expected_revision, expected_state, expected_paths, hashes, ne
         if p.sha(p.download(prefix + name, after.sha)) != expected_hash:
             raise RuntimeError(f'File checksum changed after squash: {name}')
     print('[COMPACT] History squashed and verified', flush=True)
+    # Cleanup only after the new HF state and its files have been verified.
+    import subprocess
+    subprocess.run([
+        sys.executable, str(Path(__file__).with_name('cleanup-lfs.py')),
+        '--expected-revision', after.sha,
+    ], check=True)
+
 
 
 def main():
