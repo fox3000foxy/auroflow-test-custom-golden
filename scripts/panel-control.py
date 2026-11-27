@@ -1,4 +1,5 @@
 import json
+import base64
 import os
 import sys
 import re
@@ -40,13 +41,38 @@ def publish(endpoint):
         except (OSError, ValueError, KeyError):
             pass
 
-        Path(tmp, "session.json").write_text(
-            json.dumps({
+        public_key = os.environ.get("AUROFLOW_PUBLIC_KEY", "").strip()
+
+        session = {
+            "run_id": run_id,
+            "schema_version": 3,
+            "vm": metadata
+        }
+
+        if public_key:
+            from nacl.public import PublicKey, SealedBox
+
+            key = PublicKey(base64.b64decode(public_key, validate=True))
+
+            payload = json.dumps({
+                "repository": repo.lower(),
                 "run_id": run_id,
-                "endpoint": endpoint,
-                "schema_version": 2,
-                "vm": metadata
-            }, indent=2) + "\n"
+                "endpoint": endpoint
+            }).encode("utf-8")
+
+            encrypted = SealedBox(key).encrypt(payload)
+
+            session["encrypted_endpoint"] = base64.b64encode(
+                encrypted
+            ).decode("ascii")
+
+        else:
+            # Compatibility with existing workspaces.
+            session["schema_version"] = 2
+            session["endpoint"] = endpoint
+
+        Path(tmp, "session.json").write_text(
+            json.dumps(session, indent=2) + "\\n"
         )
 
         git("add", "session.json")

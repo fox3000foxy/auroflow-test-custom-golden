@@ -59,7 +59,7 @@ jobs:
       - name: Prepare Python environment
         run: |
           python3 -m venv "$VM_ROOT/venv"
-          "$VM_ROOT/venv/bin/pip" -q install huggingface_hub
+          "$VM_ROOT/venv/bin/pip" -q install huggingface_hub pynacl
 
       - name: Initialize persistence
         env:
@@ -145,6 +145,7 @@ jobs:
       - name: Start ngrok RDP tunnel
         env:
           NGROK_AUTHTOKEN: ${{ secrets.NGROK_AUTHTOKEN }}
+          AUROFLOW_PUBLIC_KEY: ${{ vars.AUROFLOW_PUBLIC_KEY }}
           GH_TOKEN: ${{ github.token }}
         run: |
           test -n "$NGROK_AUTHTOKEN"
@@ -156,21 +157,21 @@ jobs:
           for i in $(seq 1 30); do
             if ! kill -0 "$NGROK_PID" 2>/dev/null; then
               echo "[NGROK] Process exited unexpectedly"
-              cat "$VM_ROOT/ngrok.log"
+              echo "[NGROK] Tunnel startup failed"
               exit 1
             fi
             ADDRESS=$(curl -fsS http://127.0.0.1:4040/api/tunnels |
               python3 -c 'import json,sys; print(next((t["public_url"] for t in json.load(sys.stdin)["tunnels"] if t["proto"] == "tcp"), ""))' 2>/dev/null || true)
 
             if [ -n "$ADDRESS" ]; then
-              python3 scripts/panel-control.py publish "$ADDRESS"
-              echo "::notice title=RDP address::$ADDRESS"
+              "$VM_ROOT/venv/bin/python" scripts/panel-control.py publish "$ADDRESS"
+              echo "[NGROK] RDP tunnel established"
               exit 0
             fi
             sleep 2
           done
 
-          cat "$VM_ROOT/ngrok.log"
+          echo "[NGROK] Tunnel startup failed"
           exit 1
 
       - name: Wait for shutdown
