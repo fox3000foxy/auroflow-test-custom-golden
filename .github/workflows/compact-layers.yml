@@ -44,7 +44,7 @@ jobs:
         if: env.HF_TOKEN != ''
         run: |
           sudo apt-get update -qq
-          sudo apt-get install -y --no-install-recommends qemu-utils qemu-block-extra
+          sudo apt-get install -y --no-install-recommends qemu-utils qemu-block-extra ovmf
           python3 -m venv "$VM_ROOT/venv"
           "$VM_ROOT/venv/bin/pip" -q install huggingface_hub
 
