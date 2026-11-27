@@ -17,7 +17,7 @@ from huggingface_hub import CommitOperationAdd, CommitOperationDelete
 import persistence as p
 
 MIN_LAYERS = 2
-MIN_GAIN = 0.10
+MIN_GAIN = 0.0
 
 
 def main():
