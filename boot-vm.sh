@@ -15,6 +15,21 @@ RAM="${VM_RAM:-$RAM}"
 test "$RAM" -ge 4096
 echo "[VM] Allocated RAM: ${RAM} MiB"
 echo "[VM] Allocated vCPUs: ${CPU}"
+# Publish configured resources, not guest utilization.
+python3 - "$R" "$CPU" "$RAM" <<'PYVM'
+import json, os, sys, subprocess
+from pathlib import Path
+root = Path(sys.argv[1])
+try:
+    disk = json.loads(subprocess.check_output(['qemu-img','info','--output=json',str(root/'disk.qcow2')]))
+    cpu = next((line.split(':',1)[1].strip() for line in Path('/proc/cpuinfo').read_text().splitlines() if line.startswith('model name')), 'Unknown')
+    vm = dict(vcpus=int(sys.argv[2]), memory_mib=int(sys.argv[3]), disk_virtual_bytes=disk['virtual-size'], cpu_model=cpu, acceleration='kvm', machine='q35-10.0', firmware='UEFI / OVMF', tpm='TPM 2.0', image_source='custom' if os.environ.get('GOLDEN_URL') else 'reference')
+    (root/'vm-metadata.json').write_text(json.dumps(vm))
+    print('[VM_METADATA] '+json.dumps(vm), flush=True)
+except Exception as error:
+    print('[VM] Resource metadata unavailable:', type(error).__name__, flush=True)
+PYVM
+
 test -f "$FIRMWARE"
 test -f "$R/disk.qcow2"
 test -f "$R/OVMF_VARS.fd"

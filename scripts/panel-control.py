@@ -34,10 +34,18 @@ def publish(endpoint):
         git("config", "user.email",
             "41898282+github-actions[bot]@users.noreply.github.com")
 
+        metadata = {}
+        try:
+            metadata = json.loads(Path(os.environ["VM_ROOT"], "vm-metadata.json").read_text())
+        except (OSError, ValueError, KeyError):
+            pass
+
         Path(tmp, "session.json").write_text(
             json.dumps({
                 "run_id": run_id,
-                "endpoint": endpoint
+                "endpoint": endpoint,
+                "schema_version": 2,
+                "vm": metadata
             }, indent=2) + "\n"
         )
 
