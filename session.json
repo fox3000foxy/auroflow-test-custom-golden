@@ -1,0 +1,16 @@
+{
+  "run_id": "46013971801",
+  "schema_version": 3,
+  "vm": {
+    "vcpus": 4,
+    "memory_mib": 13824,
+    "disk_virtual_bytes": 68719476736,
+    "cpu_model": "AMD EPYC 7763 64-Core Processor",
+    "acceleration": "kvm",
+    "machine": "q35-10.0",
+    "firmware": "UEFI / OVMF",
+    "tpm": "TPM 2.0",
+    "image_source": "custom"
+  },
+  "encrypted_endpoint": "9qS0SoE67LNU1RgKEbrO1/twG4+3LcojdUIb/6UDygkSnP9YwvJmQYntLpyNNGhCg4mxE5pzRNvsX0BCdA7fAEiLvFZdAVzzxDA//Ez0g+IOxoBjK11lVTBJrG/1RJupdSfs5IM8bHONtwzJvViVb9Jk2BitFEa6VY+ipkICXexyzL2BTpJFJFQwj+zaWueyLGHJC5N+PGkZX0A5"
+}
