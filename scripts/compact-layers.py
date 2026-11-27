@@ -67,13 +67,46 @@ def main():
     backing = os.path.relpath(p.base, output)
 
     print(f'[COMPACT] Consolidating {len(chain)} layers', flush=True)
-    # Flatten the complete chain before attaching the Golden Image.
-    # Safe rebase preserves guest-visible content.
+
+    # Work exclusively on copies. Never modify the saved HF layers or base.
+    work = p.root / 'compact-work'
+    work.mkdir(parents=True, exist_ok=False)
+
+    copies = []
+    parent = p.base
+
+    for index, item in enumerate(chain):
+        original = p.layers / item['id'] / 'disk.qcow2'
+        copied = work / f'{index}.qcow2'
+        shutil.copyfile(original, copied)
+
+        # Only metadata is changed. The copied backing chain is equivalent.
+        relative = os.path.relpath(parent, work)
+        p.run('qemu-img', 'rebase', '-u', '-f', 'qcow2',
+              '-F', 'qcow2', '-b', relative, str(copied))
+
+        copies.append(copied)
+        parent = copied
+
+    # Commit from newest to oldest, stopping at the first overlay.
+    # The read-only Golden Image is never a commit target.
+    for index in range(len(copies) - 1, 0, -1):
+        print(f'[COMPACT] Merging layer {index + 1}/{len(copies)}',
+              flush=True)
+        p.run('qemu-img', 'commit', '-f', 'qcow2',
+              str(copies[index]))
+
+    # The first copied overlay now contains the complete accumulated diff.
+    p.run('qemu-img', 'check', '-f', 'qcow2', str(copies[0]))
+    p.run('qemu-img', 'compare', '-f', 'qcow2', '-F', 'qcow2',
+          str(source), str(copies[0]))
+
+    # Compress only the delta relative to the unchanged Golden Image.
     p.run('qemu-img', 'convert', '-f', 'qcow2', '-O', 'qcow2',
           '-c', '-o', 'compression_type=zstd',
-          str(source), str(target))
-    p.run('qemu-img', 'rebase', '-f', 'qcow2',
-          '-F', 'qcow2', '-b', backing, str(target))
+          '-B', backing, '-F', 'qcow2',
+          str(copies[0]), str(target))
+
     p.run('qemu-img', 'check', '-f', 'qcow2', str(target))
     p.run('qemu-img', 'compare', '-f', 'qcow2', '-F', 'qcow2',
           str(source), str(target))
