@@ -1,0 +1,13 @@
+*.qcow2
+*.qcow2.*
+*.iso
+*.fd
+*.sock
+*.pid
+*.tar.gz
+*.log
+*.bak
+tpm/
+uuid
+mac
+release/

@@ -1,0 +1,190 @@
+name: AuroFlow VM
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  issues: read
+
+concurrency:
+  group: windows-golden
+  cancel-in-progress: false
+
+jobs:
+  windows:
+    runs-on: ubuntu-latest
+    timeout-minutes: 300
+
+    env:
+      GOLDEN_REPO: fox3000foxy/auroflow-engine
+      VM_MODE: fresh
+      GOLDEN_URL: ${{ vars.GOLDEN_URL }}
+      GOLDEN_SHA256: ${{ vars.GOLDEN_SHA256 }}
+
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Initialize
+        run: |
+          echo "VM_ROOT=$(mktemp -d "$RUNNER_TEMP/windows.XXXXXXXX")" >> "$GITHUB_ENV"
+          echo "DEADLINE=$(($(date +%s)+287*60))" >> "$GITHUB_ENV"
+
+      - name: Identify runner
+        id: system
+        run: |
+          echo "os=$(lsb_release -rs)" >> "$GITHUB_OUTPUT"
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y qemu-system-x86 qemu-utils qemu-block-extra ovmf swtpm swtpm-tools socat
+
+      - name: Verify virtualization
+        run: |
+          lscpu
+          free -h
+          df -h
+          sudo test -c /dev/kvm
+          sudo chmod 666 /dev/kvm
+          qemu-system-x86_64 --version
+          qemu-system-x86_64 -machine help | grep -w pc-q35-10.0
+
+      - name: Restore Python package cache
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/pip
+          key: pip-${{ runner.os }}-${{ runner.arch }}-golden-v1
+
+      - name: Prepare Python environment
+        run: |
+          python3 -m venv "$VM_ROOT/venv"
+          "$VM_ROOT/venv/bin/pip" -q install huggingface_hub
+
+      - name: Initialize persistence
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+          HF_REPO: ${{ vars.HF_REPO }}
+        run: |
+          "$VM_ROOT/venv/bin/python" scripts/init-persistence.py
+
+      - name: Restore Golden Image cache
+        id: golden-cache
+        if: vars.GOLDEN_URL == ''
+        uses: actions/cache/restore@v4
+        with:
+          path: ${{ runner.temp }}/golden-cache
+          key: golden-${{ hashFiles('golden.env') }}
+
+      - name: Download Golden Image
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+        run: |
+          if [ -n "$GOLDEN_URL" ]; then
+            "$VM_ROOT/venv/bin/python" scripts/download-custom-golden.py
+          else
+            /usr/bin/time -f "[BENCHMARK] Golden preparation: %e seconds" bash scripts/download-golden.sh
+          fi
+
+      - name: Save Golden Image cache
+        if: vars.GOLDEN_URL == '' && steps.golden-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: ${{ runner.temp }}/golden-cache
+          key: ${{ steps.golden-cache.outputs.cache-primary-key }}
+
+      - name: Restore layers
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+        run: bash scripts/restore-layers.sh
+
+      - name: Restore ngrok cache
+        uses: actions/cache@v4
+        with:
+          path: ~/.local/bin/ngrok
+          key: ngrok-${{ runner.os }}-${{ runner.arch }}-v1
+
+      - name: Install ngrok
+        run: |
+          mkdir -p "$HOME/.local/bin"
+          if [ ! -x "$HOME/.local/bin/ngrok" ]; then
+            curl -fsSL --retry 3 https://bin.equinox.io/c/bNyj1mQVY4c/ngrok-v3-stable-linux-amd64.tgz | tar -xz -C "$HOME/.local/bin" ngrok
+          fi
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+          "$HOME/.local/bin/ngrok" version
+
+      - name: Boot Windows
+        run: |
+          nohup bash boot-vm.sh \
+            > "$VM_ROOT/qemu.log" 2>&1 < /dev/null &
+
+          for i in $(seq 1 60); do
+            if test -S "$VM_ROOT/qmp.sock"; then
+              exit 0
+            fi
+            sleep 1
+          done
+
+          cat "$VM_ROOT/qemu.log"
+          exit 1
+
+      - name: Wait for RDP
+        run: |
+          for i in $(seq 1 120); do
+            if timeout 2 bash -c \
+              'echo > /dev/tcp/127.0.0.1/3390' 2>/dev/null; then
+              echo "Host RDP forwarding port reachable"
+              exit 0
+            fi
+            sleep 2
+          done
+          exit 1
+
+      # Reserved: authenticated ngrok RDP tunnel.
+
+      - name: Start ngrok RDP tunnel
+        env:
+          NGROK_AUTHTOKEN: ${{ secrets.NGROK_AUTHTOKEN }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          test -n "$NGROK_AUTHTOKEN"
+
+
+          nohup ngrok tcp 3390 --log=stdout > "$VM_ROOT/ngrok.log" 2>&1 < /dev/null &
+          NGROK_PID=$!
+
+          for i in $(seq 1 30); do
+            if ! kill -0 "$NGROK_PID" 2>/dev/null; then
+              echo "[NGROK] Process exited unexpectedly"
+              cat "$VM_ROOT/ngrok.log"
+              exit 1
+            fi
+            ADDRESS=$(curl -fsS http://127.0.0.1:4040/api/tunnels |
+              python3 -c 'import json,sys; print(next((t["public_url"] for t in json.load(sys.stdin)["tunnels"] if t["proto"] == "tcp"), ""))' 2>/dev/null || true)
+
+            if [ -n "$ADDRESS" ]; then
+              python3 scripts/panel-control.py publish "$ADDRESS"
+              echo "::notice title=RDP address::$ADDRESS"
+              exit 0
+            fi
+            sleep 2
+          done
+
+          cat "$VM_ROOT/ngrok.log"
+          exit 1
+
+      - name: Wait for shutdown
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python3 scripts/wait_shutdown.py
+
+      - name: Save persistent layers
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+        run: bash scripts/save-layers.sh
+
+      - name: Diagnostics
+        if: always()
+        run: |
+          cat "$VM_ROOT/qemu.log" || true
+          du -sh "$VM_ROOT" || true
