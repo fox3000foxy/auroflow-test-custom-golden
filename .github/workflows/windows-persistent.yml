@@ -149,7 +149,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           test -n "$NGROK_AUTHTOKEN"
-
+          "$VM_ROOT/venv/bin/python" -c 'import os,base64; from nacl.public import PublicKey; k=base64.b64decode(os.environ["AUROFLOW_PUBLIC_KEY"],validate=True); assert len(k)==32, "Invalid AuroFlow public key"; PublicKey(k)'
 
           nohup ngrok tcp 3390 --log=stdout > "$VM_ROOT/ngrok.log" 2>&1 < /dev/null &
           NGROK_PID=$!

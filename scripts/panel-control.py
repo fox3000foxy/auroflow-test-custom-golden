@@ -49,27 +49,24 @@ def publish(endpoint):
             "vm": metadata
         }
 
-        if public_key:
-            from nacl.public import PublicKey, SealedBox
+        if not public_key:
+            raise RuntimeError("AUROFLOW_PUBLIC_KEY is required; refusing plaintext session publication")
 
-            key = PublicKey(base64.b64decode(public_key, validate=True))
+        from nacl.public import PublicKey, SealedBox
 
-            payload = json.dumps({
-                "repository": repo.lower(),
-                "run_id": run_id,
-                "endpoint": endpoint
-            }).encode("utf-8")
+        key_bytes = base64.b64decode(public_key, validate=True)
+        if len(key_bytes) != 32:
+            raise RuntimeError("AUROFLOW_PUBLIC_KEY must decode to 32 bytes")
+        key = PublicKey(key_bytes)
 
-            encrypted = SealedBox(key).encrypt(payload)
+        payload = json.dumps({
+            "repository": repo.lower(),
+            "run_id": run_id,
+            "endpoint": endpoint
+        }).encode("utf-8")
 
-            session["encrypted_endpoint"] = base64.b64encode(
-                encrypted
-            ).decode("ascii")
-
-        else:
-            # Compatibility with existing workspaces.
-            session["schema_version"] = 2
-            session["endpoint"] = endpoint
+        encrypted = SealedBox(key).encrypt(payload)
+        session["encrypted_endpoint"] = base64.b64encode(encrypted).decode("ascii")
 
         Path(tmp, "session.json").write_text(
             json.dumps(session, indent=2) + "\n"
